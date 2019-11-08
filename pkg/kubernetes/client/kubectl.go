@@ -1,4 +1,4 @@
-package kubernetes
+package client
 
 import (
 	"bytes"
@@ -7,10 +7,10 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
-	"strings"
 
 	"github.com/Masterminds/semver"
 	"github.com/fatih/color"
+	"github.com/pkg/errors"
 	"github.com/stretchr/objx"
 	funk "github.com/thoas/go-funk"
 
@@ -28,12 +28,30 @@ type Kubectl struct {
 	APIServer string
 }
 
-// Version returns the version of kubectl and the Kubernetes api server
-func (k Kubectl) Version() (client, server semver.Version, err error) {
-	zero := *semver.MustParse("0.0.0")
-	if err := k.setupContext(); err != nil {
-		return zero, zero, err
+func New(endpoint string) (*Kubectl, error) {
+	k := Kubectl{
+		APIServer: endpoint,
 	}
+	if err := k.setupContext(); err != nil {
+		return nil, errors.Wrap(err, "finding usable context")
+	}
+	return &k, nil
+}
+
+func (k Kubectl) Info() (*Info, error) {
+	client, server, err := k.version()
+	if err != nil {
+		return nil, errors.Wrap(err, "obtaining versions")
+	}
+	return &Info{
+		ClientVersion: client,
+		ServerVersion: server,
+	}, nil
+}
+
+// Version returns the version of kubectl and the Kubernetes api server
+func (k Kubectl) version() (client, server *semver.Version, err error) {
+	zero := semver.MustParse("0.0.0")
 	cmd := exec.Command("kubectl", "version",
 		"-o", "json",
 		"--context", k.context.Get("name").MustStr(),
@@ -45,8 +63,8 @@ func (k Kubectl) Version() (client, server semver.Version, err error) {
 		return zero, zero, err
 	}
 	vs := objx.MustFromJSON(buf.String())
-	client = *semver.MustParse(vs.Get("clientVersion.gitVersion").MustStr())
-	server = *semver.MustParse(vs.Get("serverVersion.gitVersion").MustStr())
+	client = semver.MustParse(vs.Get("clientVersion.gitVersion").MustStr())
+	server = semver.MustParse(vs.Get("serverVersion.gitVersion").MustStr())
 	return client, server, nil
 }
 
@@ -99,35 +117,6 @@ func contextFromKubeconfig(kubeconfig map[string]interface{}, apiServer string) 
 	}
 
 	return cluster, context, nil
-}
-
-// Get retrieves an Kubernetes object from the API
-func (k Kubectl) Get(namespace, kind, name string) (map[string]interface{}, error) {
-	if err := k.setupContext(); err != nil {
-		return nil, err
-	}
-	argv := []string{"get",
-		"-o", "json",
-		"-n", namespace,
-		"--context", k.context.Get("name").MustStr(),
-		kind, name,
-	}
-	cmd := exec.Command("kubectl", argv...)
-	var sout, serr bytes.Buffer
-	cmd.Stdout = &sout
-	cmd.Stderr = &serr
-	if err := cmd.Run(); err != nil {
-		if strings.HasPrefix(serr.String(), "Error from server (NotFound)") {
-			return nil, ErrorNotFound{kind, name}
-		}
-		fmt.Print(serr.String())
-		return nil, err
-	}
-	var obj map[string]interface{}
-	if err := json.Unmarshal(sout.Bytes(), &obj); err != nil {
-		return nil, err
-	}
-	return obj, nil
 }
 
 // ApplyOpts allow to specify additional parameter for apply operations
@@ -183,7 +172,7 @@ func (k Kubectl) Apply(yaml, namespace string, opts ApplyOpts) error {
 
 // Diff takes a desired state as yaml and returns the differences
 // to the system in common diff format
-func (k Kubectl) Diff(yaml string) (*string, error) {
+func (k Kubectl) NativeDiff(yaml string) (*string, error) {
 	if err := k.setupContext(); err != nil {
 		return nil, err
 	}
@@ -220,4 +209,17 @@ func (k Kubectl) Diff(yaml string) (*string, error) {
 
 	// no diff -> nil
 	return nil, nil
+}
+
+// FilteredErr is a filtered Stderr. If one of the regular expressions match, the current input is discarded.
+type FilteredErr []*regexp.Regexp
+
+func (r FilteredErr) Write(p []byte) (n int, err error) {
+	for _, re := range r {
+		if re.Match(p) {
+			// silently discard
+			return len(p), nil
+		}
+	}
+	return os.Stderr.Write(p)
 }

@@ -25,7 +25,7 @@ type Kubernetes struct {
 	differs map[string]Differ // List of diff strategies
 }
 
-type Differ func(yaml string) (*string, error)
+type Differ func(data []byte) (*string, error)
 
 // New creates a new Kubernetes
 func New(s v1alpha1.Spec) *Kubernetes {
@@ -34,7 +34,7 @@ func New(s v1alpha1.Spec) *Kubernetes {
 	}
 	k.client.APIServer = k.Spec.APIServer
 	k.differs = map[string]Differ{
-		"native": k.client.Diff,
+		"native": k.client.NativeDiff,
 		"subset": k.client.SubsetDiff,
 	}
 	return &k
